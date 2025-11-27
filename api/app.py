@@ -1,22 +1,15 @@
 from flask import Flask, render_template, request, jsonify, make_response, redirect, url_for
-import pymysql
+import os
 import hashlib
 import json
 from datetime import datetime
 
+import db
+
 app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 
-# Database connection
-def get_db_connection():
-    return pymysql.connect(
-        host='mysql2.sqlpub.com:3307',
-        user='wordmachine',
-        password='hCe60bEjcXqbj6GH',
-        database='wordmachine',
-        charset='utf8mb4',
-        cursorclass=pymysql.cursors.DictCursor
-    )
+# Database access is provided by `api/db.py` (SQLAlchemy).
 
 # Helper function to hash password
 def hash_password(password):
@@ -26,12 +19,7 @@ def hash_password(password):
 def check_auth(uid, pw_hash):
     print(uid,pw_hash)
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM user WHERE id = %s AND pwhash = %s AND deleted = 0", (uid, pw_hash))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        user = db.fetchone('SELECT * FROM "user" WHERE id = :id AND pwhash = :pwhash AND deleted = 0', {'id': uid, 'pwhash': pw_hash})
         return user is not None
     except Exception as e:
         print(f"Database error: {e}")
@@ -56,12 +44,7 @@ def inject_auth_context():
             return {'is_authenticated': False, 'current_user': None}
 
         # fetch minimal user info
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username FROM user WHERE id = %s AND deleted = 0", (uid_int,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        user = db.fetchone('SELECT id, username FROM "user" WHERE id = :id AND deleted = 0', {'id': uid_int})
 
         return {'is_authenticated': True, 'current_user': user}
     except Exception as e:
@@ -81,12 +64,7 @@ def home():
                 uid_int = int(uid)
                 # quick auth check
                 if check_auth(uid_int, pwhash):
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT type FROM user WHERE id = %s", (uid_int,))
-                    user = cursor.fetchone()
-                    cursor.close()
-                    conn.close()
+                    user = db.fetchone('SELECT type FROM "user" WHERE id = :id', {'id': uid_int})
                     if user and user.get('type') == 'root':
                         show_admin_link = True
             except ValueError:
@@ -131,17 +109,11 @@ def admin():
             return redirect(url_for('login'))
 
         # check role
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT type FROM user WHERE id = %s", (uid_int,))
-        user = cursor.fetchone()
+        user = db.fetchone('SELECT type FROM "user" WHERE id = :id', {'id': uid_int})
         users = None
         if user and user.get('type') == 'root':
             # fetch non-deleted users by default
-            cursor.execute("SELECT id, username, introduction, rating, type, deleted FROM user ORDER BY id DESC")
-            users = cursor.fetchall()
-        cursor.close()
-        conn.close()
+            users = db.fetchall('SELECT id, username, introduction, rating, type, deleted FROM "user" ORDER BY id DESC')
 
         return render_template('admin.html', users=users)
     except Exception as e:
@@ -152,12 +124,7 @@ def admin():
 @app.route('/user/<int:profile_id>/')
 def user_profile(profile_id):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username, introduction, rating, type FROM user WHERE id = %s AND deleted = 0", (profile_id,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        user = db.fetchone('SELECT id, username, introduction, rating, type FROM "user" WHERE id = :id AND deleted = 0', {'id': profile_id})
 
         if not user:
             return redirect(url_for('home'))
@@ -172,12 +139,7 @@ def user_profile(profile_id):
 @app.route('/leaderboard/')
 def leaderboard():
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username, introduction, rating FROM user WHERE deleted = 0 ORDER BY rating DESC, id ASC LIMIT 100")
-        users = cursor.fetchall()
-        cursor.close()
-        conn.close()
+        users = db.fetchall('SELECT id, username, introduction, rating FROM "user" WHERE deleted = 0 ORDER BY rating DESC, id ASC LIMIT 100')
 
         return render_template('leaderboard.html', users=users)
     except Exception as e:
@@ -243,33 +205,18 @@ def api_register():
         if len(username) > 255 or len(password) < 6:
             return jsonify({'success': False, 'message': 'Invalid username or password length'}), 400
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Check if username already exists
-        cursor.execute("SELECT id FROM user WHERE username = %s", (username,))
-        if cursor.fetchone():
-            cursor.close()
-            conn.close()
+        if db.fetchone('SELECT id FROM "user" WHERE username = :username', {'username': username}):
             return jsonify({'success': False, 'message': 'Username already exists'}), 409
-        
-        # Insert new user
+
+        # Insert new user (RETURNING id)
         pw_hash = hash_password(password)
         print(f"[register] creating user: {username} pw={password} pw_hash={pw_hash}")
-        cursor.execute(
-            "INSERT INTO user (username, pwhash, introduction, rating, type, deleted) VALUES (%s, %s, %s, %s, %s, %s)",
-            (username, pw_hash, introduction, 0, 'normal', False)
+        uid = db.insert_returning_id(
+            'INSERT INTO "user" (username, pwhash, introduction, rating, type, deleted) VALUES (:username, :pwhash, :introduction, :rating, :type, :deleted) RETURNING id',
+            {'username': username, 'pwhash': pw_hash, 'introduction': introduction, 'rating': 0, 'type': 'normal', 'deleted': False}
         )
-        conn.commit()
-        
-        # Get the new user's ID
-        cursor.execute("SELECT id FROM user WHERE username = %s", (username,))
-        user = cursor.fetchone()
-        uid = user['id']
-        
-        cursor.close()
-        conn.close()
-        
+
         return jsonify({'success': True, 'uid': uid, 'message': 'Registration successful'}), 201
     except Exception as e:
         print(f"Register error: {e}")
@@ -285,14 +232,8 @@ def api_login():
         if not username or not password:
             return jsonify({'success': False, 'message': 'Username and password required'}), 400
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Find user by username
-        cursor.execute("SELECT id, pwhash FROM user WHERE username = %s AND deleted = 0", (username,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        user = db.fetchone('SELECT id, pwhash FROM "user" WHERE username = :username AND deleted = 0', {'username': username})
         
         if not user:
             print(f"[login] user not found: {username}")
@@ -332,13 +273,8 @@ def api_verify():
 @app.route('/api/user/<int:uid>', methods=['GET'])
 def api_get_user(uid):
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username, introduction, rating, type FROM user WHERE id = %s AND deleted = 0", (uid,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        
+        user = db.fetchone('SELECT id, username, introduction, rating, type FROM "user" WHERE id = :id AND deleted = 0', {'id': uid})
+
         if user:
             return jsonify({'success': True, 'user': user}), 200
         else:
@@ -362,51 +298,38 @@ def api_update_user(uid):
         if introduction is not None:
             introduction = introduction.strip()
         pw_hash = data.get('pwhash', '').strip()
-        
+
         # Verify authentication via pw_hash cookie/header
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
 
         # Build updates. If changing password, require current_password to be provided and correct.
         updates = []
-        params = []
-
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        params = {}
 
         if new_password is not None and new_password != '':
             # Changing password requires verifying current password
-            cursor.execute("SELECT pwhash FROM user WHERE id = %s", (uid,))
-            user = cursor.fetchone()
+            user = db.fetchone('SELECT pwhash FROM "user" WHERE id = :id', {'id': uid})
             if not user or current_password is None or user['pwhash'] != hash_password(current_password):
-                cursor.close()
-                conn.close()
                 return jsonify({'success': False, 'message': 'Current password incorrect'}), 401
 
             if len(new_password) < 6:
-                cursor.close()
-                conn.close()
                 return jsonify({'success': False, 'message': 'New password must be at least 6 characters'}), 400
 
-            updates.append("pwhash = %s")
-            params.append(hash_password(new_password))
+            updates.append('pwhash = :pwhash')
+            params['pwhash'] = hash_password(new_password)
 
         # Introduction update is allowed without re-entering current password
         if introduction is not None:
-            updates.append("introduction = %s")
-            params.append(introduction)
+            updates.append('introduction = :introduction')
+            params['introduction'] = introduction
 
         if not updates:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'No updates provided'}), 400
 
-        params.append(uid)
-        query = "UPDATE user SET " + ", ".join(updates) + " WHERE id = %s"
-        cursor.execute(query, params)
-        conn.commit()
-        cursor.close()
-        conn.close()
+        params['id'] = uid
+        query = 'UPDATE "user" SET ' + ', '.join(updates) + ' WHERE id = :id'
+        db.execute(query, params)
 
         return jsonify({'success': True, 'message': 'User updated successfully'}), 200
     except Exception as e:
@@ -429,13 +352,8 @@ def api_admin_check():
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
         # Get user info (return type for all authenticated users)
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT type FROM user WHERE id = %s", (uid,))
-        user = cursor.fetchone()
-        cursor.close()
-        conn.close()
-        
+        user = db.fetchone('SELECT type FROM "user" WHERE id = :id', {'id': uid})
+
         if user:
             return jsonify({'success': True, 'type': user['type']}), 200
         else:
@@ -458,26 +376,17 @@ def api_admin_users():
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT type FROM user WHERE id = %s", (uid,))
-        user = cursor.fetchone()
-        
+        user = db.fetchone('SELECT type FROM "user" WHERE id = :id', {'id': uid})
+
         if not user or user['type'] != 'root':
-            cursor.close()
-            conn.close()
             return jsonify({'success': False}), 403
-        
+
         # Get users
         if include_deleted:
-            cursor.execute("SELECT id, username, introduction, rating, type, deleted FROM user ORDER BY id DESC")
+            users = db.fetchall('SELECT id, username, introduction, rating, type, deleted FROM "user" ORDER BY id DESC')
         else:
-            cursor.execute("SELECT id, username, introduction, rating, type, deleted FROM user WHERE deleted = 0 ORDER BY id DESC")
-        
-        users = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        
+            users = db.fetchall('SELECT id, username, introduction, rating, type, deleted FROM "user" WHERE deleted = 0 ORDER BY id DESC')
+
         return jsonify({'success': True, 'users': users}), 200
     except Exception as e:
         print(f"Get users error: {e}")
@@ -501,35 +410,23 @@ def api_admin_reset_password(target_uid):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT type FROM user WHERE id = %s", (uid,))
-        user = cursor.fetchone()
+        user = db.fetchone('SELECT type FROM "user" WHERE id = :id', {'id': uid})
         
         if not user or user['type'] != 'root':
-            cursor.close()
-            conn.close()
             return jsonify({'success': False}), 403
         
         # Cannot reset own password via admin
         if uid == target_uid:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Cannot reset own password via admin'}), 400
         
         # Check target user exists
-        cursor.execute("SELECT id FROM user WHERE id = %s", (target_uid,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        target_user = db.fetchone('SELECT id FROM "user" WHERE id = :id', {'id': target_uid})
+        if not target_user:
             return jsonify({'success': False, 'message': 'Target user not found'}), 404
         
         # Reset password
         new_pw_hash = hash_password(new_password)
-        cursor.execute("UPDATE user SET pwhash = %s WHERE id = %s", (new_pw_hash, target_uid))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "user" SET pwhash = :pwhash WHERE id = :id', {'pwhash': new_pw_hash, 'id': target_uid})
         
         return jsonify({'success': True, 'message': 'Password reset successfully'}), 200
     except Exception as e:
@@ -550,34 +447,22 @@ def api_admin_delete_user(target_uid):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT type FROM user WHERE id = %s", (uid,))
-        user = cursor.fetchone()
+        user = db.fetchone('SELECT type FROM "user" WHERE id = :id', {'id': uid})
         
         if not user or user['type'] != 'root':
-            cursor.close()
-            conn.close()
             return jsonify({'success': False}), 403
         
         # Cannot delete own account
         if uid == target_uid:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Cannot delete own account'}), 400
         
         # Check target user exists
-        cursor.execute("SELECT id FROM user WHERE id = %s", (target_uid,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        target_user = db.fetchone('SELECT id FROM "user" WHERE id = :id', {'id': target_uid})
+        if not target_user:
             return jsonify({'success': False, 'message': 'Target user not found'}), 404
         
         # Soft delete user
-        cursor.execute("UPDATE user SET deleted = 1 WHERE id = %s", (target_uid,))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "user" SET deleted = 1 WHERE id = :id', {'id': target_uid})
         
         return jsonify({'success': True, 'message': 'User deleted successfully'}), 200
     except Exception as e:
@@ -598,28 +483,18 @@ def api_admin_restore_user(target_uid):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT type FROM user WHERE id = %s", (uid,))
-        user = cursor.fetchone()
+        user = db.fetchone('SELECT type FROM "user" WHERE id = :id', {'id': uid})
         
         if not user or user['type'] != 'root':
-            cursor.close()
-            conn.close()
             return jsonify({'success': False}), 403
         
         # Check target user exists
-        cursor.execute("SELECT id FROM user WHERE id = %s", (target_uid,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        target_user = db.fetchone('SELECT id FROM "user" WHERE id = :id', {'id': target_uid})
+        if not target_user:
             return jsonify({'success': False, 'message': 'Target user not found'}), 404
         
         # Restore user
-        cursor.execute("UPDATE user SET deleted = 0 WHERE id = %s", (target_uid,))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "user" SET deleted = 0 WHERE id = :id', {'id': target_uid})
         
         return jsonify({'success': True, 'message': 'User restored successfully'}), 200
     except Exception as e:
@@ -641,21 +516,15 @@ def api_get_dicts():
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get all non-deleted dicts with word count
-        cursor.execute("""
+        dicts = db.fetchall("""
             SELECT d.id, d.dictname, COUNT(w.id) as word_count
-            FROM dict d
-            LEFT JOIN word w ON d.id = w.dictid AND w.deleted = 0
+            FROM "dict" d
+            LEFT JOIN "word" w ON d.id = w.dictid AND w.deleted = 0
             WHERE d.deleted = 0
             GROUP BY d.id
             ORDER BY d.id DESC
         """)
-        dicts = cursor.fetchall()
-        cursor.close()
-        conn.close()
 
         return jsonify({'success': True, 'dicts': dicts}), 200
     except Exception as e:
@@ -677,15 +546,11 @@ def api_create_dict():
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Create dict
-        cursor.execute("INSERT INTO dict (dictname, deleted) VALUES (%s, 0)", (dictname,))
-        conn.commit()
-        dict_id = cursor.lastrowid
-        cursor.close()
-        conn.close()
+        dict_id = db.insert_returning_id(
+            'INSERT INTO "dict" (dictname, deleted) VALUES (:dictname, :deleted) RETURNING id',
+            {'dictname': dictname, 'deleted': False}
+        )
 
         return jsonify({'success': True, 'dict_id': dict_id, 'message': 'Dictionary created'}), 201
     except Exception as e:
@@ -707,21 +572,13 @@ def api_update_dict(dict_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check dict exists
-        cursor.execute("SELECT id FROM dict WHERE id = %s AND deleted = 0", (dict_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        dict_obj = db.fetchone('SELECT id FROM "dict" WHERE id = :id AND deleted = 0', {'id': dict_id})
+        if not dict_obj:
             return jsonify({'success': False, 'message': 'Dictionary not found'}), 404
 
         # Update dict
-        cursor.execute("UPDATE dict SET dictname = %s WHERE id = %s", (dictname, dict_id))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "dict" SET dictname = :dictname WHERE id = :id', {'dictname': dictname, 'id': dict_id})
 
         return jsonify({'success': True, 'message': 'Dictionary updated'}), 200
     except Exception as e:
@@ -742,22 +599,14 @@ def api_delete_dict(dict_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check dict exists
-        cursor.execute("SELECT id FROM dict WHERE id = %s AND deleted = 0", (dict_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        dict_obj = db.fetchone('SELECT id FROM "dict" WHERE id = :id AND deleted = 0', {'id': dict_id})
+        if not dict_obj:
             return jsonify({'success': False, 'message': 'Dictionary not found'}), 404
 
         # Soft delete dict and cascade delete its words
-        cursor.execute("UPDATE dict SET deleted = 1 WHERE id = %s", (dict_id,))
-        cursor.execute("UPDATE word SET deleted = 1 WHERE dictid = %s", (dict_id,))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "dict" SET deleted = 1 WHERE id = :id', {'id': dict_id})
+        db.execute('UPDATE "word" SET deleted = 1 WHERE dictid = :dictid', {'dictid': dict_id})
 
         return jsonify({'success': True, 'message': 'Dictionary and its words deleted'}), 200
     except Exception as e:
@@ -779,24 +628,16 @@ def api_get_words(dict_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check dict exists
-        cursor.execute("SELECT id FROM dict WHERE id = %s AND deleted = 0", (dict_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        dict_obj = db.fetchone('SELECT id FROM "dict" WHERE id = :id AND deleted = 0', {'id': dict_id})
+        if not dict_obj:
             return jsonify({'success': False, 'message': 'Dictionary not found'}), 404
 
         # Get non-deleted words
-        cursor.execute(
-            "SELECT id, dictid, english, chinese FROM word WHERE dictid = %s AND deleted = 0 ORDER BY id ASC",
-            (dict_id,)
+        words = db.fetchall(
+            'SELECT id, dictid, english, chinese FROM "word" WHERE dictid = :dictid AND deleted = 0 ORDER BY id ASC',
+            {'dictid': dict_id}
         )
-        words = cursor.fetchall()
-        cursor.close()
-        conn.close()
 
         return jsonify({'success': True, 'words': words}), 200
     except Exception as e:
@@ -819,25 +660,16 @@ def api_create_word(dict_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check dict exists
-        cursor.execute("SELECT id FROM dict WHERE id = %s AND deleted = 0", (dict_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        dict_obj = db.fetchone('SELECT id FROM "dict" WHERE id = :id AND deleted = 0', {'id': dict_id})
+        if not dict_obj:
             return jsonify({'success': False, 'message': 'Dictionary not found'}), 404
 
         # Create word
-        cursor.execute(
-            "INSERT INTO word (dictid, english, chinese, deleted) VALUES (%s, %s, %s, 0)",
-            (dict_id, english, chinese)
+        word_id = db.insert_returning_id(
+            'INSERT INTO "word" (dictid, english, chinese, deleted) VALUES (:dictid, :english, :chinese, :deleted) RETURNING id',
+            {'dictid': dict_id, 'english': english, 'chinese': chinese, 'deleted': False}
         )
-        conn.commit()
-        word_id = cursor.lastrowid
-        cursor.close()
-        conn.close()
 
         return jsonify({'success': True, 'word_id': word_id, 'message': 'Word created'}), 201
     except Exception as e:
@@ -860,25 +692,16 @@ def api_update_word(word_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check word exists
-        cursor.execute("SELECT dictid FROM word WHERE id = %s AND deleted = 0", (word_id,))
-        word = cursor.fetchone()
+        word = db.fetchone('SELECT dictid FROM "word" WHERE id = :id AND deleted = 0', {'id': word_id})
         if not word:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Word not found'}), 404
 
         # Update word
-        cursor.execute(
-            "UPDATE word SET english = %s, chinese = %s WHERE id = %s",
-            (english, chinese, word_id)
+        db.execute(
+            'UPDATE "word" SET english = :english, chinese = :chinese WHERE id = :id',
+            {'english': english, 'chinese': chinese, 'id': word_id}
         )
-        conn.commit()
-        cursor.close()
-        conn.close()
 
         return jsonify({'success': True, 'message': 'Word updated'}), 200
     except Exception as e:
@@ -899,21 +722,13 @@ def api_delete_word(word_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check word exists
-        cursor.execute("SELECT id FROM word WHERE id = %s AND deleted = 0", (word_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        word = db.fetchone('SELECT id FROM "word" WHERE id = :id AND deleted = 0', {'id': word_id})
+        if not word:
             return jsonify({'success': False, 'message': 'Word not found'}), 404
 
         # Soft delete word
-        cursor.execute("UPDATE word SET deleted = 1 WHERE id = %s", (word_id,))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "word" SET deleted = 1 WHERE id = :id', {'id': word_id})
 
         return jsonify({'success': True, 'message': 'Word deleted'}), 200
     except Exception as e:
@@ -937,14 +752,9 @@ def api_import_csv(dict_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check dict exists
-        cursor.execute("SELECT id FROM dict WHERE id = %s AND deleted = 0", (dict_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        dict_obj = db.fetchone('SELECT id FROM "dict" WHERE id = :id AND deleted = 0', {'id': dict_id})
+        if not dict_obj:
             return jsonify({'success': False, 'message': 'Dictionary not found'}), 404
 
         # Parse CSV and insert words
@@ -958,15 +768,11 @@ def api_import_csv(dict_id):
             if len(parts) == 2:
                 english, chinese = parts[0].strip(), parts[1].strip()
                 if english and chinese:
-                    cursor.execute(
-                        "INSERT INTO word (dictid, english, chinese, deleted) VALUES (%s, %s, %s, 0)",
-                        (dict_id, english, chinese)
+                    db.execute(
+                        'INSERT INTO "word" (dictid, english, chinese, deleted) VALUES (:dictid, :english, :chinese, :deleted)',
+                        {'dictid': dict_id, 'english': english, 'chinese': chinese, 'deleted': False}
                     )
                     count += 1
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
 
         return jsonify({'success': True, 'count': count, 'message': f'{count} words imported'}), 200
     except Exception as e:
@@ -986,25 +792,16 @@ def api_export_csv(dict_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False}), 401
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
         # Check dict exists
-        cursor.execute("SELECT dictname FROM dict WHERE id = %s AND deleted = 0", (dict_id,))
-        dict_info = cursor.fetchone()
+        dict_info = db.fetchone('SELECT dictname FROM "dict" WHERE id = :id AND deleted = 0', {'id': dict_id})
         if not dict_info:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Dictionary not found'}), 404
 
         # Get words
-        cursor.execute(
-            "SELECT english, chinese FROM word WHERE dictid = %s AND deleted = 0 ORDER BY id ASC",
-            (dict_id,)
+        words = db.fetchall(
+            'SELECT english, chinese FROM "word" WHERE dictid = :dictid AND deleted = 0 ORDER BY id ASC',
+            {'dictid': dict_id}
         )
-        words = cursor.fetchall()
-        cursor.close()
-        conn.close()
 
         # Generate CSV content
         csv_lines = [f"{word['english']},{word['chinese']}" for word in words]
@@ -1038,21 +835,13 @@ def api_game_create():
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Check if dictionary exists and has words
-        cursor.execute("SELECT id FROM dict WHERE id = %s AND deleted = 0", (dict_id,))
-        if not cursor.fetchone():
-            cursor.close()
-            conn.close()
+        dict_obj = db.fetchone('SELECT id FROM "dict" WHERE id = :id AND deleted = 0', {'id': dict_id})
+        if not dict_obj:
             return jsonify({'success': False, 'message': 'Dictionary not found'}), 404
         
-        cursor.execute("SELECT id FROM word WHERE dictid = %s AND deleted = 0", (dict_id,))
-        words = cursor.fetchall()
+        words = db.fetchall('SELECT id FROM "word" WHERE dictid = :dictid AND deleted = 0', {'dictid': dict_id})
         if not words:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Dictionary has no words'}), 400
         
         # Shuffle word list
@@ -1064,16 +853,10 @@ def api_game_create():
         users = json.dumps([uid])
         
         # Create game (status=-1 for not started)
-        cursor.execute(
-            "INSERT INTO game (dictid, users, wordlist, result, status, ownerid) VALUES (%s, %s, %s, %s, %s, %s)",
-            (dict_id, users, wordlist, '[]', -1, uid)
+        game_id = db.insert_returning_id(
+            'INSERT INTO "game" (dictid, users, wordlist, result, status, ownerid) VALUES (:dictid, :users, :wordlist, :result, :status, :ownerid) RETURNING id',
+            {'dictid': dict_id, 'users': users, 'wordlist': wordlist, 'result': '[]', 'status': -1, 'ownerid': uid}
         )
-        conn.commit()
-        
-        # Get the new game's ID
-        game_id = cursor.lastrowid
-        cursor.close()
-        conn.close()
         
         return jsonify({'success': True, 'game_id': game_id, 'message': 'Game created'}), 201
     except Exception as e:
@@ -1094,17 +877,13 @@ def api_game_list():
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get all games with dict info
-        cursor.execute("""
+        games = db.fetchall("""
             SELECT g.id, g.dictid, d.dictname, g.users, g.wordlist, g.result, g.status, g.perf, g.ownerid
-            FROM game g
-            LEFT JOIN dict d ON g.dictid = d.id
+            FROM "game" g
+            LEFT JOIN "dict" d ON g.dictid = d.id
             ORDER BY g.id DESC
         """)
-        games = cursor.fetchall()
         
         # Parse JSON fields for each game and fetch user info
         for game in games:
@@ -1116,8 +895,7 @@ def api_game_list():
             # Fetch user info for all users in the game
             users_info = []
             for user_id in user_ids:
-                cursor.execute("SELECT id, username FROM user WHERE id = %s", (user_id,))
-                user = cursor.fetchone()
+                user = db.fetchone('SELECT id, username FROM "user" WHERE id = :id', {'id': user_id})
                 if user:
                     users_info.append(user)
             game['users'] = users_info
@@ -1125,12 +903,8 @@ def api_game_list():
             # Fetch owner info if present
             owner_info = None
             if game.get('ownerid'):
-                cursor.execute("SELECT id, username FROM user WHERE id = %s", (game['ownerid'],))
-                owner_info = cursor.fetchone()
+                owner_info = db.fetchone('SELECT id, username FROM "user" WHERE id = :id', {'id': game['ownerid']})
             game['owner'] = owner_info
-        
-        cursor.close()
-        conn.close()
         
         return jsonify({'success': True, 'games': games}), 200
     except Exception as e:
@@ -1151,21 +925,15 @@ def api_game_get(game_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get game info
-        cursor.execute("""
+        game = db.fetchone("""
             SELECT g.id, g.dictid, d.dictname, g.users, g.wordlist, g.result, g.status, g.ownerid
-            FROM game g
-            LEFT JOIN dict d ON g.dictid = d.id
-            WHERE g.id = %s
-        """, (game_id,))
-        game = cursor.fetchone()
+            FROM "game" g
+            LEFT JOIN "dict" d ON g.dictid = d.id
+            WHERE g.id = :id
+        """, {'id': game_id})
         
         if not game:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Game not found'}), 404
         
         # Parse JSON fields
@@ -1176,22 +944,19 @@ def api_game_get(game_id):
         # Get user info for all users in the game
         users_info = []
         for user_id in game['users']:
-            cursor.execute("SELECT id, username FROM user WHERE id = %s", (user_id,))
-            user = cursor.fetchone()
+            user = db.fetchone('SELECT id, username FROM "user" WHERE id = :id', {'id': user_id})
             if user:
                 users_info.append(user)
         
         # Get owner info
         owner_info = None
         if game.get('ownerid'):
-            cursor.execute("SELECT id, username FROM user WHERE id = %s", (game['ownerid'],))
-            owner_info = cursor.fetchone()
+            owner_info = db.fetchone('SELECT id, username FROM "user" WHERE id = :id', {'id': game['ownerid']})
         
         # Get word info for all words in the wordlist
         words_info = []
         for word_id in game['wordlist']:
-            cursor.execute("SELECT id, english, chinese FROM word WHERE id = %s", (word_id,))
-            word = cursor.fetchone()
+            word = db.fetchone('SELECT id, english, chinese FROM "word" WHERE id = :id', {'id': word_id})
             if word:
                 words_info.append(word)
         
@@ -1211,8 +976,6 @@ def api_game_get(game_id):
                     perf_map[uid_result]['wrong'] += 1
                     perf_map[uid_result]['perf'] -= 1
         
-        cursor.close()
-        conn.close()
         # Determine next turn and next word (use shared wordlist and round-robin turns)
         next_turn_user = None
         next_word_info = None
@@ -1222,15 +985,7 @@ def api_game_get(game_id):
                 next_turn_user = game['users'][current_index % len(game['users'])]
                 next_word_id = game['wordlist'][current_index]
                 # fetch next word info (Chinese prompt + english expected answer)
-                conn2 = get_db_connection()
-                c2 = conn2.cursor()
-                c2.execute("SELECT id, english, chinese FROM word WHERE id = %s AND deleted = 0", (next_word_id,))
-                w = c2.fetchone()
-                try:
-                    c2.close()
-                    conn2.close()
-                except Exception:
-                    pass
+                w = db.fetchone('SELECT id, english, chinese FROM "word" WHERE id = :id AND deleted = 0', {'id': next_word_id})
                 if w:
                     next_word_info = {'id': w['id'], 'english': w['english'], 'chinese': w['chinese']}
         except Exception:
@@ -1273,45 +1028,30 @@ def api_game_join(game_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get game
-        cursor.execute("SELECT users, status, result FROM game WHERE id = %s", (game_id,))
-        game = cursor.fetchone()
+        game = db.fetchone('SELECT users, status, result FROM "game" WHERE id = :id', {'id': game_id})
         
         if not game:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Game not found'}), 404
         
-        if game['status']!=-1:
-            cursor.close()
-            conn.close()
+        if game['status'] != -1:
             return jsonify({'success': False, 'message': 'Game already started, cannot join'}), 400
         
         # Check if game is finished (has results)
         result = json.loads(game['result']) if game['result'] else []
         if result:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Game already finished, cannot join'}), 400
         
         # Parse users and add new user
         users = json.loads(game['users']) if game['users'] else []
         if uid in users:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Already joined'}), 400
         
         users.append(uid)
         random.shuffle(users)  # Re-shuffle user order
         
         # Update game
-        cursor.execute("UPDATE game SET users = %s WHERE id = %s", (json.dumps(users), game_id))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "game" SET users = :users WHERE id = :id', {'users': json.dumps(users), 'id': game_id})
         
         return jsonify({'success': True, 'message': 'Joined game'}), 200
     except Exception as e:
@@ -1333,42 +1073,27 @@ def api_game_leave(game_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get game
-        cursor.execute("SELECT users, status, ownerid FROM game WHERE id = %s", (game_id,))
-        game = cursor.fetchone()
+        game = db.fetchone('SELECT users, status, ownerid FROM "game" WHERE id = :id', {'id': game_id})
         
         if not game:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Game not found'}), 404
         
         if game['status'] != -1:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Cannot leave started or finished game'}), 400
         
         # Parse users and remove user
         users = json.loads(game['users']) if game['users'] else []
         # Owner cannot leave the game
         if game.get('ownerid') and uid == game.get('ownerid'):
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Owner cannot leave the game'}), 400
         if uid not in users:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Not in game'}), 400
         
         users.remove(uid)
         
         # Update game
-        cursor.execute("UPDATE game SET users = %s WHERE id = %s", (json.dumps(users), game_id))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "game" SET users = :users WHERE id = :id', {'users': json.dumps(users), 'id': game_id})
         
         return jsonify({'success': True, 'message': 'Left game'}), 200
     except Exception as e:
@@ -1390,26 +1115,17 @@ def api_game_start(game_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get game
-        cursor.execute("SELECT users FROM game WHERE id = %s", (game_id,))
-        game = cursor.fetchone()
+        game = db.fetchone('SELECT users FROM "game" WHERE id = :id', {'id': game_id})
         
         if not game:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Game not found'}), 404
         
         # Check if uid is the creator (first user in the original list, but we need to track this better)
         # For now, allow any user to start (as per gen.md: "发起者有权点击开始按钮开始对局")
         # TODO: Store creator_id in game table for proper authorization
         
-        cursor.execute("UPDATE game SET status = %s WHERE id = %s", (0, game_id))
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "game" SET status = :status WHERE id = :id', {'status': 0, 'id': game_id})
         
         return jsonify({'success': True, 'message': 'Game started'}), 200
     except Exception as e:
@@ -1433,22 +1149,14 @@ def api_game_answer(game_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get game
-        cursor.execute("SELECT users, result, wordlist FROM game WHERE id = %s", (game_id,))
-        game = cursor.fetchone()
+        game = db.fetchone('SELECT users, result, wordlist FROM "game" WHERE id = :id', {'id': game_id})
         if not game:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Game not found'}), 404
         
         # Check if user is in the game
         users = json.loads(game['users']) if game['users'] else []
         if uid not in users:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Not in game'}), 400
 
         # Parse existing results and determine whose turn it is and which word is expected
@@ -1457,28 +1165,19 @@ def api_game_answer(game_id):
         current_index = len(result)
 
         if current_index >= len(wordlist):
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'All words have been answered'}), 400
 
         expected_user = users[current_index % len(users)]
         if uid != expected_user:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Not your turn'}), 400
 
         expected_word_id = wordlist[current_index]
         if word_id != expected_word_id:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'This is not the expected word for your turn'}), 400
 
         # Get expected word info
-        cursor.execute("SELECT english, chinese FROM word WHERE id = %s AND deleted = 0", (word_id,))
-        word = cursor.fetchone()
+        word = db.fetchone('SELECT english, chinese FROM "word" WHERE id = :id AND deleted = 0', {'id': word_id})
         if not word:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Word not found'}), 404
 
         # Check if answer is correct (answer should be the English word; prompt will be Chinese in UI)
@@ -1493,8 +1192,7 @@ def api_game_answer(game_id):
         })
 
         # Update game result
-        cursor.execute("UPDATE game SET result = %s WHERE id = %s", (json.dumps(result), game_id))
-        conn.commit()
+        db.execute('UPDATE "game" SET result = :result WHERE id = :id', {'result': json.dumps(result), 'id': game_id})
 
         # Prepare next turn info
         next_turn = None
@@ -1502,13 +1200,9 @@ def api_game_answer(game_id):
         if len(result) < len(game['wordlist']):
             next_turn = users[len(result) % len(users)]
             next_word_id = game['wordlist'][len(result)]
-            cursor.execute("SELECT id, english, chinese FROM word WHERE id = %s AND deleted = 0", (next_word_id,))
-            nw = cursor.fetchone()
+            nw = db.fetchone('SELECT id, english, chinese FROM "word" WHERE id = :id AND deleted = 0', {'id': next_word_id})
             if nw:
                 next_word = {'id': nw['id'], 'english': nw['english'], 'chinese': nw['chinese']}
-
-        cursor.close()
-        conn.close()
 
         return jsonify({
             'success': True,
@@ -1537,23 +1231,15 @@ def api_game_end(game_id):
         if not check_auth(uid, pw_hash):
             return jsonify({'success': False, 'message': 'Authentication failed'}), 401
         
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
         # Get game
-        cursor.execute("SELECT users, result FROM game WHERE id = %s", (game_id,))
-        game = cursor.fetchone()
+        game = db.fetchone('SELECT users, result FROM "game" WHERE id = :id', {'id': game_id})
         
         if not game:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Game not found'}), 404
         
         # Check if user is in the game (or anyone can end?)
         users = json.loads(game['users']) if game['users'] else []
         if uid not in users:
-            cursor.close()
-            conn.close()
             return jsonify({'success': False, 'message': 'Not in game'}), 400
         
         # Calculate perf for each user
@@ -1573,18 +1259,13 @@ def api_game_end(game_id):
         
         # Update ratings for each user
         for user_id, perf in perf_map.items():
-            cursor.execute("SELECT rating FROM user WHERE id = %s", (user_id,))
-            user = cursor.fetchone()
+            user = db.fetchone('SELECT rating FROM "user" WHERE id = :id', {'id': user_id})
             if user:
                 new_rating = user['rating'] + perf
-                cursor.execute("UPDATE user SET rating = %s WHERE id = %s", (new_rating, user_id))
+                db.execute('UPDATE "user" SET rating = :rating WHERE id = :id', {'rating': new_rating, 'id': user_id})
         
         # Update game: status=1 (finished)
-        cursor.execute("UPDATE game SET status = %s WHERE id = %s", (1, game_id))
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        db.execute('UPDATE "game" SET status = :status WHERE id = :id', {'status': 1, 'id': game_id})
         
         return jsonify({'success': True, 'perf': perf_map, 'message': 'Game ended and ratings updated'}), 200
     except Exception as e:
