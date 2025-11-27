@@ -10,10 +10,10 @@ app.config['JSON_SORT_KEYS'] = False
 # Database connection
 def get_db_connection():
     return pymysql.connect(
-        host='localhost',
-        user='wm',
-        password='wm123!@#',
-        database='wm',
+        host='mysql2.sqlpub.com:3307',
+        user='wordmachine',
+        password='hCe60bEjcXqbj6GH',
+        database='wordmachine',
         charset='utf8mb4',
         cursorclass=pymysql.cursors.DictCursor
     )
