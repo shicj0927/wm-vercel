@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>主页 - WordMachine</title>
+    <link rel="stylesheet" href="/static/css/color.css">
+    <link rel="stylesheet" href="/static/css/basic.css">
+    <link rel="stylesheet" href="/static/css/admin.css">
+    <link rel="stylesheet" href="/static/css/game.css">
+</head>
+<body>
+    <div class="game-container">
+        {% include '_navbar.html' %}
+        
+        <main class="main-content">
+            <div class="game-layout">
+                <!-- Left: Notifications Section -->
+                <div class="notifications-section">
+                    <h2>📢 通知</h2>
+                    <div id="notificationsList">
+                        <div class="notification-item">
+                            <div class="notification-title">系统通知</div>
+                            <div class="notification-content">
+                                请不要随意删除词典，违者删号。
+                            </div>
+                            <div class="notification-meta">2025-11-26</div>
+                        </div>
+                        <div class="notification-item">
+                            <div class="notification-title">开发计划</div>
+                            <div class="notification-content">
+                                对局系统和评分系统正在开发中。<br>
+                                敬请期待更多功能！
+                            </div>
+                            <div class="notification-meta">进行中</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Right: Games Section -->
+                <div class="games-section">
+                    <h2>对局大厅</h2>
+                    
+                    <div class="create-game-section">
+                        <button class="btn-create-game" id="createGameBtn">+ 创建新对局</button>
+                    </div>
+
+                    <div class="games-tabs">
+                        <button class="games-tab active" data-tab="pending">待开始</button>
+                        <button class="games-tab" data-tab="running">进行中</button>
+                        <button class="games-tab" data-tab="finished">已结束</button>
+                    </div>
+
+                    <div id="gamesList">
+                        <div class="empty-state">
+                            <div class="empty-state-icon">⏳</div>
+                            <div class="empty-state-text">加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    
+    <script src="/static/js/basic.js"></script>
+    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/game.js"></script>
+</body>
+</html>
