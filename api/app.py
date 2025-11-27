@@ -1591,5 +1591,3 @@ def api_game_end(game_id):
         print(f"Game end error: {e}")
         return jsonify({'success': False, 'message': 'Server error'}), 500
 
-if __name__ == '__main__':
-    app.run(debug=True,host="0.0.0.0",port="80")
